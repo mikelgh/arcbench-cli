@@ -39,11 +39,13 @@ a command-line argument, and never print or commit the env file.
 ## Always use `--json`
 
 Every command with `--json` prints one compact JSON record (or array) to stdout.
-Do not parse the default human-readable output; it can change. Two stream traps:
-diagnostic lines (e.g. a queue-full notice) also go to stdout but are always
-prefixed `[arcbench] ` — parse each stdout line as JSON and skip lines with that
-prefix; and when a request fails, the error record goes to **stderr**, not
-stdout, so capture both streams.
+Do not parse the default human-readable output; it can change. Progress and
+errors go to **stderr**, leaving stdout for command results. Under `--json`,
+failures are JSON records carrying `error_kind` and `exit_code`; request errors
+also identify the origin, route, HTTP status, timeout, elapsed time and request
+id. Capture both streams and preserve the original process exit code. Add
+`--log-file /path/to/diagnostics.jsonl` for private, redacted request metadata;
+the log excludes bodies, headers and query parameters.
 
 ## The loop
 
@@ -162,8 +164,9 @@ session`（会弹钥匙串授权），之后把结果 env 文件路径交给 age
 `export ARCBENCH_ENV_FILE=~/.config/arcbench/team.env`。凭据只从该文件读取，永远
 不要把 cookie 或模型 key 写进命令行参数或提交进仓库。
 
-**永远加 `--json`**：每条命令输出一行紧凑 JSON。诊断信息同样走 stdout 但带
-`[arcbench] ` 前缀，按行跳过；请求失败时错误记录在 **stderr**，两个流都要收。
+**永远加 `--json`**：stdout 只含命令结果，诊断和错误统一走 **stderr**。失败 JSON
+保留 `error_kind`、`exit_code` 及请求上下文；调用方要收两个流并保留原退出码。需要持久
+诊断时加 `--log-file /path/to/diagnostics.jsonl`，日志不含 body、header 或查询参数。
 
 **主循环**：`package → upload（校验哈希） → run → wait → status/logs/source →
 leaderboard`，各步示例见上文英文部分，命令与参数完全一致。`run` 和 `submit` 的 `--task`

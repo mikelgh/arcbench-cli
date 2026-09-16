@@ -86,6 +86,30 @@ can supply credentials without writing one. `--base-url` overrides
 Global flags work before or after the subcommand. `--json` prints one compact
 JSON record per command, which is the form to use from a script or an agent.
 
+## Request diagnostics
+
+```sh
+arcbench --env-file ~/.config/arcbench/team.env --json balance \
+  --log-file /tmp/arcbench-balance.jsonl
+```
+
+`--log-file PATH` appends JSONL command and request events to a regular file with
+mode `600`. Its parent directory must already exist. Each request records its
+origin, path (without query parameters), method, local request id, timeout,
+elapsed milliseconds, HTTP status and failure kind. The log does not include
+full request or response bodies, headers, full arguments, or env-file contents.
+Command failures retain a bounded, sanitized upstream error description. Known
+keys and cookie values are redacted in errors. A failure to open the requested
+log stops before any network call; a later disk-write failure warns on stderr
+and disables logging without changing the command outcome.
+
+`error_kind` distinguishes `authentication` (HTTP 401/403), `rate_limit` (429),
+`http`, `timeout`, `dns`, `tls`, `connection`, `incomplete_response`, `network`,
+`invalid_response`, and local/API errors. Transport failures include the exception
+and cause types and, when available, errno. Logging does not add retries or
+change exit codes. A malformed balance response now fails explicitly instead
+of reporting a null balance.
+
 ## Commands
 
 Discovery:
@@ -259,10 +283,11 @@ arcbench --json whoami
 arcbench --json status RUN_ID
 ```
 
-Two details about the streams. Diagnostic lines such as a queue-full notice also go
-to stdout, but every one of them is prefixed `[arcbench] `, so parse each stdout line
-as JSON and skip the lines that start with that prefix. When a request fails under
-`--json`, the error record is printed to **stderr**, not stdout, so capture both.
+Progress diagnostics and errors go to **stderr**; stdout contains only command
+results. Under `--json`, execution failures are JSON objects with `error`, `error_kind`, and
+`exit_code`. Request failures also retain HTTP status, method, path, origin,
+timeout, elapsed milliseconds, and a local request id. Capture both streams and
+preserve the process exit code when calling the CLI from another program.
 
 **Exit codes.** The table under [Exit codes](#exit-codes) is the contract. Two
 points matter to an agent in particular:
@@ -579,9 +604,9 @@ arcbench --json whoami
 arcbench --json status RUN_ID
 ```
 
-关于输出流有两点要注意：排队提示之类的诊断信息同样走 stdout，但它们一律带
-`[arcbench] ` 前缀，所以按行解析 JSON、跳过带该前缀的行即可；而 `--json` 模式下请求
-失败时，错误记录打到 **stderr** 而不是 stdout，两个流都要收。
+进度诊断和错误统一走 **stderr**，stdout 只含命令结果。`--json` 失败记录包含
+`error`、`error_kind`、`exit_code`；请求错误还保留 HTTP 状态、方法、路径、服务地址、
+超时配置、耗时和本地请求编号。调用方应同时保留两个流和原退出码。
 
 **退出码。** 契约见上文[退出码表](#exit-codes)。对 agent 尤其重要的是两条：
 
