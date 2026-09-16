@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — request diagnostics
+## 0.3.1 — request diagnostics
 
 * Add `--log-file PATH` for private JSONL request metadata with local request ids,
   origins, routes, status codes, timeout settings and elapsed time.
