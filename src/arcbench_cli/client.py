@@ -36,6 +36,8 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
+from .diagnostics import active as active_diagnostics, failure_kind, http_failure_kind
+
 DEFAULT_BASE_URL = "https://arc-bench.com"
 DEFAULT_API_BASE_URL = "https://api.arc-bench.com/v1"
 DEFAULT_METER_BASE_URL = "https://meter.arc-bench.com"
@@ -301,6 +303,8 @@ class ApiError(RuntimeError):
         path: str | None = None,
         uncertain: bool = False,
         transport: bool = False,
+        kind: str | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.details = {
@@ -310,7 +314,9 @@ class ApiError(RuntimeError):
             "path": path,
             "outcome_uncertain": uncertain,
             "transport_failure": transport,
+            "error_kind": kind or (http_failure_kind(status) if status is not None else "api"),
         }
+        self.details.update(context or {})
 
     @property
     def status(self) -> int | None:
@@ -470,9 +476,10 @@ class OfficialClient:
     def __init__(self, config: SubmitConfig):
         self.config = config
         self.last_response_headers: dict[str, str] = {}
-        self.known_secrets: list[str] = []
+        self.known_secrets: list[str] = [config.api_key] if config.api_key else []
+        self.last_request_details: dict[str, Any] = {}
         parsed = urllib.parse.urlparse(config.base_url)
-        if parsed.scheme not in ("https", "http") or not parsed.netloc:
+        if parsed.scheme not in ("https", "http") or not parsed.netloc or parsed.username or parsed.password:
             raise ValueError("base URL must be an http(s) origin")
         self.origin = f"{parsed.scheme}://{parsed.netloc}"
         self.cookies = http.cookiejar.CookieJar()
@@ -514,7 +521,12 @@ class OfficialClient:
 
     def safe(self, value: Any) -> Any:
         secrets = [*self.known_secrets, *(cookie.value for cookie in self.cookies)]
-        return sanitize(value, tuple(secrets))
+        value = sanitize(value, tuple(secrets))
+        diagnostics = active_diagnostics.get()
+        if diagnostics is not None:
+            diagnostics.remember(*secrets)
+            value = diagnostics.safe(value)
+        return value
 
     # --- transport -------------------------------------------------------
 
@@ -526,31 +538,45 @@ class OfficialClient:
         content_type: str | None = None,
     ) -> tuple[int, Any]:
         """Perform one request. Never retries, for any method."""
+        started = time.monotonic()
+        self.last_response_headers = {}
+        self.last_request_details = {
+            "request_id": uuid.uuid4().hex,
+            "origin": self.origin,
+            "timeout_seconds": self.config.timeout_seconds,
+        }
+        diagnostics = active_diagnostics.get()
+        path = urllib.parse.urlparse(url).path
+        context = {**self.last_request_details, "method": method, "path": path}
+        self.safe(None)  # Register configured credentials before the first request.
+        if diagnostics is not None:
+            diagnostics.record("request_started", **self.safe(context))
         headers = {"Accept": "application/json", "User-Agent": "arcbench-cli/0.3"}
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         if data is not None and content_type:
             request.add_header("Content-Type", content_type)
-        path = urllib.parse.urlparse(url).path
         safe_method = method in ("GET", "HEAD")
+        status = None
+        request_error = None
         try:
-            with self.opener.open(request, timeout=self.config.timeout_seconds) as response:
+            try:
+                response = self.opener.open(request, timeout=self.config.timeout_seconds)
+            except urllib.error.HTTPError as error:
+                response = error
+            with response:
+                status = response.code
                 self.last_response_headers = _normalize_headers(response.headers)
                 body = response.read()
                 content = response.headers.get("Content-Type", "")
                 if "application/json" not in content and body[:1] not in (b"{", b"["):
-                    return response.status, body
+                    return status, body
                 try:
-                    return response.status, json.loads(body.decode("utf-8"))
+                    return status, json.loads(body.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
-                    return response.status, body.decode("utf-8", "replace")[:2000]
-        except urllib.error.HTTPError as error:
-            self.last_response_headers = _normalize_headers(error.headers)
-            raw = error.read().decode("utf-8", "replace")
-            try:
-                return error.code, json.loads(raw)
-            except json.JSONDecodeError:
-                return error.code, raw[:2000]
-        except ApiError:
+                    return status, body.decode("utf-8", "replace")[:2000]
+        except ApiError as error:
+            request_error = error
+            error.details.update(self.safe(self.last_request_details))
             raise
         except (
             http.client.IncompleteRead,
@@ -559,13 +585,41 @@ class OfficialClient:
             OSError,
         ) as error:
             # A truncated body is a transport failure, never a run result.
-            raise ApiError(
+            reason = error.reason if isinstance(error, urllib.error.URLError) else error
+            request_error = ApiError(
                 self.safe(f"{type(error).__name__}: {error}"),
+                status=status,
                 method=method,
-                path=path,
+                path=self.safe(path),
                 uncertain=not safe_method,
                 transport=True,
-            ) from None
+                kind=failure_kind(error),
+                context=self.safe({
+                    **self.last_request_details,
+                    "exception_type": type(error).__name__,
+                    "cause_type": type(reason).__name__,
+                    "errno": getattr(reason, "errno", None),
+                }),
+            )
+            raise request_error from None
+        finally:
+            elapsed = round((time.monotonic() - started) * 1000, 2)
+            self.last_request_details["elapsed_ms"] = elapsed
+            if request_error is not None:
+                request_error.details["elapsed_ms"] = elapsed
+            if diagnostics is not None:
+                diagnostics.record(
+                    "request_finished", **self.safe(context), elapsed_ms=elapsed,
+                    http_status=status,
+                    outcome_uncertain=(request_error.uncertain if request_error else
+                                       not safe_method and status is not None and (status >= 500 or status == 408)),
+                    transport_failure=bool(request_error and request_error.transport),
+                    error_kind=(request_error.details["error_kind"] if request_error else
+                                http_failure_kind(status) if status is not None and status >= 400 else None),
+                    **({"exception_type": request_error.details.get("exception_type"),
+                        "cause_type": request_error.details.get("cause_type"),
+                        "errno": request_error.details.get("errno")} if request_error else {}),
+                )
 
     def request(self, method: str, path: str, data: bytes | None = None, content_type: str | None = None) -> Any:
         """Call one API route and raise ApiError unless the status is 2xx."""
@@ -574,13 +628,17 @@ class OfficialClient:
         status, payload = self._request(method, f"{self.config.base_url}/api{path}", data, content_type)
         if not 200 <= status < 300:
             detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+            if isinstance(detail, bytes):
+                detail = detail.decode("utf-8", "replace")
+            detail = self.safe(detail)
             message = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)[:300]
             raise ApiError(
-                self.safe(str(message)),
+                self.safe(str(message))[:2000],
                 status=status,
                 method=method,
-                path=path,
+                path=self.safe(urllib.parse.urlparse(path).path),
                 uncertain=method not in ("GET", "HEAD") and (status >= 500 or status == 408),
+                context=self.safe(self.last_request_details),
             )
         return payload
 
@@ -747,6 +805,8 @@ class OfficialClient:
                 f"meter login set no {METER_SESSION_COOKIE} cookie",
                 method="POST",
                 path="/user/login",
+                kind="authentication",
+                context=self.safe(self.last_request_details),
             )
         account = payload.get("account") if isinstance(payload, dict) else None
         return account if isinstance(account, dict) else {}
@@ -755,6 +815,12 @@ class OfficialClient:
         """Read the metering dashboard's balance and billing freshness."""
         balance = self.request("GET", "/user/balance")
         snapshot = balance.get("balance") or {} if isinstance(balance, dict) else {}
+        if not isinstance(snapshot, dict) or snapshot.get("available_balance", snapshot.get("balance")) is None:
+            raise ApiError(
+                "meter balance response has no available balance",
+                status=200, method="GET", path="/user/balance", kind="invalid_response",
+                context=self.safe(self.last_request_details),
+            )
         freshness = self.request("GET", "/user/freshness")
         freshness = freshness if isinstance(freshness, dict) else {}
         return {
@@ -889,7 +955,9 @@ class OfficialClient:
     def start_run(self, run_id: str) -> dict[str, Any]:
         status, payload = self._request("POST", f"{self.config.base_url}/api/runs/{quote(run_id)}/start")
         if not 200 <= status < 300:
-            raise RunStartError(str(run_id), status, payload, self.last_response_headers)
+            error = RunStartError(str(run_id), status, self.safe(payload), self.last_response_headers)
+            error.details.update(self.safe(self.last_request_details))
+            raise error
         return unwrap(payload, "run")
 
     def cancel_run(self, run_id: str) -> dict[str, Any]:

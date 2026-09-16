@@ -39,6 +39,7 @@ from .client import (
     write_record,
 )
 from .session import capture_chrome_cookie, default_env_path
+from .diagnostics import Diagnostics, active as active_diagnostics, failure_kind
 
 PACKAGE_EXCLUDED = {"node_modules", ".git", "dist", "__pycache__", ".venv", ".pytest_cache"}
 ENTRYPOINTS = ("main.py", "index.js", "index.ts")
@@ -49,7 +50,11 @@ class CliError(RuntimeError):
 
 
 def log(message: str) -> None:
-    print(f"[arcbench] {message}", flush=True)
+    diagnostics = active_diagnostics.get()
+    if diagnostics is not None:
+        message = diagnostics.safe(message)
+        diagnostics.record("progress", message=message)
+    print(f"[arcbench] {message}", file=sys.stderr, flush=True)
 
 
 def emit(args: argparse.Namespace, record: Any, lines: list[str] | None = None) -> None:
@@ -74,6 +79,13 @@ def _env_file(args: argparse.Namespace) -> Path | None:
 
 def _config(args: argparse.Namespace) -> tuple[dict[str, str], SubmitConfig]:
     env = load_env(_env_file(args))
+    diagnostics = active_diagnostics.get()
+    if diagnostics is not None:
+        for key, value in env.items():
+            if any(word in key.lower() for word in ("key", "cookie", "token", "password", "secret")):
+                diagnostics.remember(value)
+                if "cookie" in key.lower():
+                    diagnostics.remember(*(part.partition("=")[2].strip() for part in value.split(";")))
     config = SubmitConfig.from_env(env)
     if getattr(args, "base_url", None):
         config.base_url = args.base_url.rstrip("/")
@@ -865,6 +877,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--env-file", default=None, help="env file to read; overrides ARCBENCH_ENV_FILE"
     )
     parser.add_argument("--json", action="store_true", help="emit one compact JSON record")
+    parser.add_argument("--log-file", default=None, help="append private JSONL request diagnostics to PATH")
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -875,6 +888,7 @@ def build_parser() -> argparse.ArgumentParser:
     shared.add_argument("--base-url", default=argparse.SUPPRESS)
     shared.add_argument("--env-file", default=argparse.SUPPRESS)
     shared.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    shared.add_argument("--log-file", default=argparse.SUPPRESS)
 
     def add(name: str, help_text: str, handler) -> argparse.ArgumentParser:
         command = sub.add_parser(name, help=help_text, parents=[shared])
@@ -1015,25 +1029,39 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = resolve_run_id(build_parser().parse_args(argv))
+    diagnostics = Diagnostics(args.log_file)
+    token = active_diagnostics.set(diagnostics)
+
+    def fail(details: dict[str, Any], code: int) -> int:
+        details = diagnostics.safe({**details, "exit_code": code})
+        diagnostics.record("command_failed", command=args.command, **details)
+        if args.json:
+            print(json.dumps(details, ensure_ascii=False), file=sys.stderr, flush=True)
+        else:
+            # Keep request context visible even when a caller omitted --json.
+            print("[arcbench] " + json.dumps(details, ensure_ascii=False), file=sys.stderr, flush=True)
+        return code
+
     try:
-        return args.func(args)
+        diagnostics.open()
+        diagnostics.record("command_started", command=args.command)
+        code = args.func(args)
+        diagnostics.record("command_finished", command=args.command, exit_code=code)
+        return code
     except KeyboardInterrupt:
-        log("interrupted")
-        return 130
+        return fail({"error": "interrupted", "error_kind": "interrupted"}, 130)
     except BrokenPipeError:
         return 0
     except ApiError as error:
-        if getattr(args, "json", False):
-            print(json.dumps(error.details, ensure_ascii=False), file=sys.stderr, flush=True)
-        else:
-            log(str(error))
-        return 1
+        return fail(error.details, 1)
     except RunQueueTimeoutError as error:
-        log(str(error))
-        return 2
-    except (CliError, RuntimeError, ValueError, OSError) as error:
-        log(str(error))
-        return 1
+        return fail({"error": str(error), "error_kind": "queue_timeout", "run_id": error.run_id}, 2)
     except urllib.error.URLError as error:
-        log(f"network error: {error.reason}")
-        return 1
+        return fail({"error": str(error), "error_kind": failure_kind(error),
+                     "exception_type": type(error).__name__}, 1)
+    except (CliError, RuntimeError, ValueError, OSError) as error:
+        return fail({"error": str(error), "error_kind": "local",
+                     "exception_type": type(error).__name__}, 1)
+    finally:
+        diagnostics.close()
+        active_diagnostics.reset(token)

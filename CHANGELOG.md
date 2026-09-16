@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1 — request diagnostics
+
+* Add `--log-file PATH` for private JSONL request metadata with local request ids,
+  origins, routes, status codes, timeout settings and elapsed time.
+* Send progress and all expected execution errors to stderr, preserving stdout
+  for command results. JSON errors retain the process exit code and distinguish
+  authentication, DNS, TLS, timeout, connection and truncated-response failures.
+* Preserve HTTP status when reading an error response fails; keep uncertain-write
+  semantics and retry behavior unchanged. Reject a malformed balance response
+  instead of returning a null amount.
+* Redact configured keys, cookies and credential-shaped error fields; do not log
+  request bodies or headers. Diagnostic files use mode `600`.
+
 ## 0.3.0 — concurrency and meter login
 
 ### The concurrency doctrine was wrong
