@@ -265,3 +265,63 @@ class MergedHelperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeResponse:
+    """A urllib response: headers, code, chunked read, optional cut after a prefix."""
+
+    def __init__(self, code, body, headers=None, cut_after=None):
+        self.code, self._body, self.headers = code, body, headers or {}
+        self._cut_after, self._pos = cut_after, 0
+
+    def read(self, size=-1):
+        if self._cut_after is not None and self._pos >= self._cut_after:
+            import http.client
+            raise http.client.IncompleteRead(b"", len(self._body) - self._pos)
+        end = len(self._body) if size is None or size < 0 else min(len(self._body), self._pos + size)
+        if self._cut_after is not None:
+            end = min(end, self._cut_after)
+        piece = self._body[self._pos:end]
+        self._pos = end
+        return piece
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class BinaryResumeTests(unittest.TestCase):
+    def test_a_cut_archive_stream_is_resumed_with_range(self) -> None:
+        body = bytes(range(256)) * 300  # 76,800 bytes; the cut lands after 70,000
+        first = _FakeResponse(200, body, {"Content-Length": str(len(body)), "Content-Type": "application/zip"}, cut_after=70_000)
+        rest = _FakeResponse(206, body[70_000:], {"Content-Range": f"bytes 70000-{len(body) - 1}/{len(body)}",
+                                                  "Content-Type": "application/zip"})
+        client = OfficialClient(SubmitConfig(timeout_seconds=3))
+        with patch.object(client.opener, "open", side_effect=[first, rest]) as opened:
+            self.assertEqual(client.binary("/runs/run-1/workspace/template-bundle"), body)
+        self.assertEqual(opened.call_count, 2)
+        self.assertEqual(opened.call_args_list[1].args[0].get_header("Range"), "bytes=70000-")
+
+    def test_a_stream_that_keeps_cutting_fails_as_a_transport_error(self) -> None:
+        body = b"x" * 1000
+        responses = [_FakeResponse(200, body, {"Content-Length": "1000"}, cut_after=500)]
+        responses += [_FakeResponse(206, body[500:], {"Content-Range": "bytes 500-999/1000"}, cut_after=0)
+                      for _ in range(OfficialClient.RESUME_ATTEMPTS)]
+        client = OfficialClient(SubmitConfig(timeout_seconds=3))
+        with patch.object(client.opener, "open", side_effect=responses):
+            with self.assertRaises(ApiError) as caught:
+                client.binary("/runs/run-1/workspace/template-bundle")
+        self.assertEqual(caught.exception.details["error_kind"], "incomplete_response")
+        self.assertTrue(caught.exception.details["transport_failure"])
+        self.assertEqual(caught.exception.details["bytes_received"], 500)
+
+    def test_a_json_body_is_not_an_archive(self) -> None:
+        client = OfficialClient(SubmitConfig(timeout_seconds=3))
+        response = _FakeResponse(200, b'{"detail": "nope"}', {"Content-Type": "application/json", "Content-Length": "18"})
+        with patch.object(client.opener, "open", side_effect=[response]):
+            with self.assertRaises(ApiError) as caught:
+                client.binary("/submissions/s-1/archive")
+        self.assertIn("received JSON", str(caught.exception))
+
