@@ -187,6 +187,10 @@ arcbench archive SUBMISSION_ID --output ./out/submitted.zip
 `source` paths are relative to the generated template root, so `backend/...`
 rather than `template/backend/...`.
 
+`download` and `archive` resume with a `Range` request when the platform cuts the
+stream (a 19 MB workspace bundle is regularly closed before its last megabyte);
+up to six resumes, then an `incomplete_response` transport error with the byte count.
+
 ### Exit codes
 
 | Code | Meaning |

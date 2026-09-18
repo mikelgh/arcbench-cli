@@ -642,11 +642,76 @@ class OfficialClient:
             )
         return payload
 
+    RESUME_ATTEMPTS = 6
+
     def binary(self, path: str) -> bytes:
-        payload = self.request("GET", path)
-        if not isinstance(payload, (bytes, bytearray)):
-            raise ApiError("expected an archive, received JSON", method="GET", path=path)
-        return bytes(payload)
+        """Fetch an archive, resuming with ``Range`` after a cut stream.
+
+        The platform closes a workspace bundle stream before the last megabyte
+        (four consecutive ``IncompleteRead`` at 18.0 of 18.9 MB on one run), so a
+        single ``GET`` never completes; a ``Range`` request for the rest does.
+        Only ``GET`` is retried here, and only from the byte where the stream broke.
+        """
+        if not path.startswith("/") or path.startswith("//") or "#" in path:
+            raise ValueError("expected a relative API path")
+        url = f"{self.config.base_url}/api{path}"
+        received = bytearray()
+        total: int | None = None
+        cut: BaseException | None = None
+        for _attempt in range(self.RESUME_ATTEMPTS):
+            headers = {"Accept": "*/*", "User-Agent": "arcbench-cli/0.3"}
+            if received:
+                headers["Range"] = f"bytes={len(received)}-"
+            request = urllib.request.Request(url, headers=headers, method="GET")
+            try:
+                try:
+                    response = self.opener.open(request, timeout=self.config.timeout_seconds)
+                except urllib.error.HTTPError as error:
+                    response = error
+                with response:
+                    status = response.code
+                    if not 200 <= status < 300:
+                        body = response.read()[:300]
+                        raise ApiError(
+                            self.safe(body.decode("utf-8", "replace")) or f"HTTP {status}",
+                            status=status, method="GET", path=self.safe(urllib.parse.urlparse(url).path),
+                        )
+                    if received and status != 206:
+                        received = bytearray()  # the server ignored Range; the whole body follows
+                    content_range = response.headers.get("Content-Range", "")
+                    if status == 206 and "/" in content_range and content_range.rsplit("/", 1)[1].isdigit():
+                        total = int(content_range.rsplit("/", 1)[1])
+                    elif status == 200 and response.headers.get("Content-Length", "").isdigit():
+                        total = int(response.headers["Content-Length"])
+                    cut = None
+                    try:
+                        while True:
+                            piece = response.read(1 << 16)
+                            if not piece:
+                                break
+                            received += piece
+                    except http.client.IncompleteRead as error:
+                        received += error.partial
+                        cut = error
+            except (http.client.HTTPException, urllib.error.URLError, OSError) as error:
+                if isinstance(error, http.client.IncompleteRead):
+                    received += error.partial
+                cut = error
+            if not received and cut is None:
+                break
+            if cut is None and (total is None or len(received) >= total):
+                if received[:1] in (b"{", b"[") and "application/json" in response.headers.get("Content-Type", ""):
+                    raise ApiError("expected an archive, received JSON", method="GET", path=path)
+                return bytes(received)
+            if total is not None and len(received) >= total:
+                return bytes(received)
+        reason = cut or http.client.IncompleteRead(bytes(received), (total or 0) - len(received))
+        raise ApiError(
+            self.safe(f"{type(reason).__name__}: {reason}"),
+            method="GET", path=self.safe(urllib.parse.urlparse(url).path),
+            transport=True, kind=failure_kind(reason),
+            context={"bytes_received": len(received), "bytes_expected": total, "attempts": self.RESUME_ATTEMPTS},
+        )
 
     # --- reads -----------------------------------------------------------
 
