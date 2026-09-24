@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0 — official hackathon
+
+* `upload --official-evaluation` saves a submission scored on the team's
+  competition budget (`credential_mode=official_evaluation`); the platform
+  creates the key, so none is sent and `--api-key-env` is refused.
+  `--visual-model` passes the visual model name through.
+* `registration COMPETITION` reads the team registration, leader flag and
+  remaining budget; exit 1 while unregistered.
+* `requirements COMPETITION --output FILE` downloads the requirement documents.
+* Confirming a team stays a website action: it is one-time and makes the
+  confirming account the leader.
+
 ## 0.3.1 — request diagnostics
 
 * Add `--log-file PATH` for private JSONL request metadata with local request ids,

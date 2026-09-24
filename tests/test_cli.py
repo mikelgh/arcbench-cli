@@ -36,6 +36,8 @@ COMMANDS = {
     "leaderboard",
     "package",
     "upload",
+    "registration",
+    "requirements",
     "run",
     "start",
     "cancel",
@@ -197,6 +199,45 @@ class FakeClient:
     def start_run_with_queue_wait(self, run_id, timeout_seconds, on_wait=None):
         self.calls.append("start_run_with_queue_wait")
         return {"id": run_id, "status": "PASSED", "token_count": 123}
+
+
+class OfficialEvaluationParserTests(unittest.TestCase):
+    def test_upload_accepts_official_evaluation_and_visual_model(self) -> None:
+        args = build_parser().parse_args(
+            ["upload", "agent.zip", "--competition", "hackathon", "--official-evaluation",
+             "--model", "deepseek-v4-flash", "--visual-model", "deepseek-v4-flash-vision-exp"]
+        )
+        self.assertTrue(args.official_evaluation)
+        self.assertEqual(args.visual_model, "deepseek-v4-flash-vision-exp")
+
+    def test_upload_defaults_to_self_funded(self) -> None:
+        args = build_parser().parse_args(["upload", "agent.zip", "--competition", "arc-bench-lite"])
+        self.assertFalse(args.official_evaluation)
+        self.assertIsNone(args.visual_model)
+
+    def test_official_evaluation_refuses_a_personal_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "agent.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("main.py", "print('agent')\n")
+            args = build_parser().parse_args(
+                ["upload", str(package), "--competition", "hackathon", "--official-evaluation",
+                 "--api-key-env", "SOME_KEY"]
+            )
+            client = FakeClient(object())
+            with (
+                patch.object(cli_module, "load_env", return_value={"ARC_BENCH_SESSION_COOKIE": "arcbench_session=c"}),
+                patch.object(cli_module, "OfficialClient", return_value=client),
+            ):
+                with self.assertRaises(cli_module.CliError):
+                    cli_module.cmd_upload(args)
+            self.assertNotIn("upload", client.calls)
+
+    def test_registration_and_requirements_parse(self) -> None:
+        args = build_parser().parse_args(["registration", "hackathon"])
+        self.assertEqual(args.competition, "hackathon")
+        args = build_parser().parse_args(["requirements", "hackathon", "--output", "req.zip"])
+        self.assertEqual(args.output, "req.zip")
 
 
 class SubmitFlowTests(unittest.TestCase):

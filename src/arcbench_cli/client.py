@@ -936,6 +936,15 @@ class OfficialClient:
     def download_workspace(self, run_id: str) -> bytes:
         return self.binary(f"/runs/{quote(run_id)}/workspace/template-bundle")
 
+    def registration(self, competition_id: str) -> dict[str, Any]:
+        """Read the account's team registration and remaining budget for an official competition."""
+        payload = self.request("GET", f"/competitions/{quote(competition_id)}/registration")
+        return payload if isinstance(payload, dict) else {}
+
+    def download_requirements(self, competition_id: str) -> bytes:
+        """Download a competition's requirement documents; entry needs a confirmed team."""
+        return self.binary(f"/competitions/{quote(competition_id)}/requirements-download")
+
     # --- writes ----------------------------------------------------------
 
     def create_submission(
@@ -946,24 +955,36 @@ class OfficialClient:
         model: str,
         runtime: str = "python",
         api_key: str | None = None,
+        official_evaluation: bool = False,
+        visual_model: str | None = None,
     ) -> dict[str, Any]:
-        key = api_key if api_key is not None else self.config.api_key
-        if not key:
-            key = self.access_key()
-        if not key:
-            raise ValueError("no model gateway key: set ARC_BENCH_API_KEY or use --api-key-env")
-        self.known_secrets.append(key)
+        """Save a submission.
+
+        ``official_evaluation`` is the website's "use competition budget"
+        checkbox: the platform creates and bills its own key per evaluation, so
+        no key is sent. Otherwise the run is self-funded with the account key.
+        """
         fields = {
             "competition_id": competition_id,
             "runtime": runtime,
             "catalog": "competition",
             "agent_source": "upload",
+            "credential_mode": "official_evaluation" if official_evaluation else "self_funded",
             "display_name": name,
             "base_url": self.config.api_base_url,
-            "api_key": key,
-            "model": model,
-            "model_name": model,
         }
+        if not official_evaluation:
+            key = api_key if api_key is not None else self.config.api_key
+            if not key:
+                key = self.access_key()
+            if not key:
+                raise ValueError("no model gateway key: set ARC_BENCH_API_KEY or use --api-key-env")
+            self.known_secrets.append(key)
+            fields["api_key"] = key
+        fields["model"] = model
+        fields["model_name"] = model
+        if visual_model:
+            fields["visual_model"] = visual_model
         body, content_type = build_multipart(fields, "file", package)
         payload = self.request("POST", "/submissions", body, content_type)
         return unwrap(payload, "submission")
@@ -976,6 +997,8 @@ class OfficialClient:
         model: str,
         runtime: str = "python",
         api_key: str | None = None,
+        official_evaluation: bool = False,
+        visual_model: str | None = None,
     ) -> dict[str, Any]:
         """Save a submission, then verify the stored archive by download.
 
@@ -983,7 +1006,9 @@ class OfficialClient:
         caller never re-uploads to recover one.
         """
         digest = sha256_file(package)
-        submission = self.create_submission(package, competition_id, name, model, runtime, api_key)
+        submission = self.create_submission(
+            package, competition_id, name, model, runtime, api_key, official_evaluation, visual_model
+        )
         result: dict[str, Any] = {
             "submission": self.safe(submission),
             "uploaded_sha256": digest,

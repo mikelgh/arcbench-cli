@@ -159,6 +159,18 @@ arcbench start RUN_ID                          # start a run that is still PENDI
 arcbench cancel RUN_ID
 ```
 
+Official competitions (the 2026 hackathon, `hackathon`) need a confirmed team:
+the account that confirms on the website becomes the team leader, and only the
+leader can start a scored evaluation. `--official-evaluation` is the website's
+"use competition budget" box: the platform creates and bills its own key, so no
+key is sent.
+
+```sh
+arcbench registration hackathon                # registered, leader, remaining budget
+arcbench requirements hackathon --output ./hackathon-requirements.zip
+arcbench upload dist/agent.zip --competition hackathon --official-evaluation --name v1
+```
+
 Or all of it in one command, which also writes a JSON result record:
 
 ```sh
@@ -398,7 +410,9 @@ against the live service. The bundle is not vendored.
 | Leaderboard | `GET /api/competitions/leaderboard?track=all&competition_id=…&task_id=…` |
 | Official test pack | `GET /api/requirements/{task_id}/tests?catalog=competition` |
 | List submissions | `GET /api/submissions` |
-| Save submission | `POST /api/submissions` (multipart: competition_id, runtime, catalog, agent_source, display_name, base_url, api_key, model, file) |
+| Save submission | `POST /api/submissions` (multipart: competition_id, runtime, catalog, agent_source, credential_mode `self_funded`\|`official_evaluation`, display_name, base_url, api_key (self-funded only), model, visual_model, file) |
+| Official registration | `GET /api/competitions/{id}/registration` (confirming is `POST` with `member_emails`, `confirmed`; the CLI does not do it) |
+| Requirement documents | `GET /api/competitions/{id}/requirements-download` |
 | Download submission archive | `GET /api/submissions/{id}/archive` |
 | Create run | `POST /api/runs` (multipart: submission_id, requirement_id) |
 | Start run | `POST /api/runs/{id}/start` |
@@ -523,6 +537,9 @@ agent 用这个。
 * 查看类：`competitions`、`tasks`、`fetch`、`leaderboard`、`submissions`、`runs`
 * 账号类：`whoami`、`balance`、`models`、`usage`、`requests`
 * 提交类：`package`、`upload`、`run`、`start`、`cancel`、`submit`
+* 正式赛：`registration`（报名状态、是否队长、剩余比赛额度）、`requirements`（下载需求文档）、
+  `upload --official-evaluation`（勾选「使用比赛额度评测」，平台自建 key 计费，不上传个人 key）。
+  确认队伍只能在网页上由队长做，CLI 不代办。
 * 跟踪类：`status`、`wait`、`logs`、`source`、`download`、`archive`
 
 `balance`、`models`、`usage`、`requests` 都用网关 access key 登录 `meter.arc-bench.com`
