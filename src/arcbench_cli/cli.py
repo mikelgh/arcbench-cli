@@ -510,24 +510,53 @@ def cmd_upload(args: argparse.Namespace) -> int:
     _, client = _client(args)
     package = Path(args.package).expanduser().resolve()
     validate_package(package)
+    official = bool(getattr(args, "official_evaluation", False))
+    if official and getattr(args, "api_key_env", None):
+        raise CliError("--official-evaluation uses the platform's own key; drop --api-key-env")
     result = client.upload(
         package,
         args.competition,
         args.name or package.stem,
         args.model or client.config.model,
         args.runtime,
-        _resolve_key(args),
+        None if official else _resolve_key(args),
+        official_evaluation=official,
+        visual_model=getattr(args, "visual_model", None),
     )
     submission_id = result["submission"].get("id")
+    mode = result["submission"].get("credential_mode") or ("official_evaluation" if official else "self_funded")
     emit(
         args,
         result,
         [
             f"submission={submission_id} archive_verified={result['archive_verified']} "
-            f"sha256={result['uploaded_sha256'][:12]}..."
+            f"sha256={result['uploaded_sha256'][:12]}... credential_mode={mode}"
         ],
     )
     return 0 if result["archive_verified"] else 1
+
+
+def cmd_registration(args: argparse.Namespace) -> int:
+    """Read the team registration and remaining budget for an official competition."""
+    _, client = _client(args)
+    record = client.registration(args.competition)
+    emit(
+        args,
+        record,
+        [
+            f"competition={record.get('competition_id')} registered={record.get('registered')} "
+            f"team={record.get('team_name')} leader={record.get('is_team_leader')} "
+            f"remaining_cny={record.get('remaining_budget_cny')} initial_cny={record.get('initial_budget_cny')}",
+            *( [str(record["message"])] if record.get("message") else [] ),
+        ],
+    )
+    return 0 if record.get("registered") else 1
+
+
+def cmd_requirements(args: argparse.Namespace) -> int:
+    """Download a competition's requirement documents (needs a confirmed team)."""
+    _, client = _client(args)
+    return _save_bytes(args, client.download_requirements(args.competition), Path(args.output))
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -950,6 +979,19 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--model")
     command.add_argument("--runtime", choices=("python", "node"), default="python")
     command.add_argument("--api-key-env", help="read the model key from this environment variable")
+    command.add_argument(
+        "--official-evaluation",
+        action="store_true",
+        help="score this submission on the team's competition budget; the platform supplies the key",
+    )
+    command.add_argument("--visual-model", help="visual model name passed to the agent")
+
+    command = add("registration", "read the team registration and budget for an official competition", cmd_registration)
+    command.add_argument("competition")
+
+    command = add("requirements", "download a competition's requirement documents", cmd_requirements)
+    command.add_argument("competition")
+    command.add_argument("--output", required=True, help="new file to write, e.g. requirements.zip")
 
     command = add("run", "create and start one run per task, from a saved submission", cmd_run)
     command.add_argument("submission")

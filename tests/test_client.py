@@ -139,6 +139,69 @@ class ClientTests(unittest.TestCase):
         )
 
 
+class SubmissionCredentialTests(unittest.TestCase):
+    """The official hackathon scores a submission on the team budget with a platform key."""
+
+    class FakeClient(OfficialClient):
+        def __init__(self, api_key: str = "") -> None:
+            super().__init__(SubmitConfig(api_key=api_key))
+            self.bodies: list[bytes] = []
+            self.key_reads = 0
+
+        def access_key(self) -> str:
+            self.key_reads += 1
+            return "account-key"
+
+        def request(self, method, path, data=None, content_type=None):
+            assert method == "POST" and path == "/submissions", (method, path)
+            self.bodies.append(data or b"")
+            return {"submission": {"id": "submission-1"}}
+
+    @staticmethod
+    def fields(body: bytes) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for part in body.split(b"\r\n--"):
+            head, _, value = part.partition(b"\r\n\r\n")
+            marker = b'name="'
+            if marker not in head or b"filename=" in head:
+                continue
+            name = head.split(marker, 1)[1].split(b'"', 1)[0].decode()
+            found[name] = value.rsplit(b"\r\n", 1)[0].decode()
+        return found
+
+    def package(self, tmp: str) -> Path:
+        path = Path(tmp) / "agent.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("main.py", "print('agent')\n")
+        return path
+
+    def test_official_evaluation_sends_mode_and_no_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self.FakeClient(api_key="should-not-be-sent")
+            client.create_submission(
+                self.package(tmp), "hackathon", "v1", "deepseek-v4-flash",
+                official_evaluation=True, visual_model="deepseek-v4-flash-vision-exp",
+            )
+            fields = self.fields(client.bodies[0])
+            self.assertEqual(fields["credential_mode"], "official_evaluation")
+            self.assertNotIn("api_key", fields)
+            self.assertNotIn(b"should-not-be-sent", client.bodies[0])
+            self.assertEqual(client.key_reads, 0)
+            self.assertEqual(fields["model"], "deepseek-v4-flash")
+            self.assertEqual(fields["visual_model"], "deepseek-v4-flash-vision-exp")
+            self.assertEqual(fields["competition_id"], "hackathon")
+
+    def test_default_is_self_funded_with_the_account_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self.FakeClient()
+            client.create_submission(self.package(tmp), "arc-bench-lite", "v1", "deepseek-v4-flash")
+            fields = self.fields(client.bodies[0])
+            self.assertEqual(fields["credential_mode"], "self_funded")
+            self.assertEqual(fields["api_key"], "account-key")
+            self.assertNotIn("visual_model", fields)
+            self.assertEqual(client.key_reads, 1)
+
+
 class QueueWaitTests(unittest.TestCase):
     def test_retries_429_then_succeeds(self) -> None:
         class FakeClient(OfficialClient):
