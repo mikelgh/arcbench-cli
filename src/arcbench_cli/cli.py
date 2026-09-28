@@ -232,6 +232,83 @@ def cmd_balance(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Run a quick environment self-check and report what is configured."""
+    env_path = _env_file(args)
+    checks: dict[str, Any] = {}
+    ok = True
+    
+    # env file
+    if env_path and env_path.exists():
+        checks["env_file"] = str(env_path)
+    else:
+        checks["env_file"] = "MISSING"
+        ok = False
+    
+    # load env and config
+    env = load_env(env_path)
+    config = SubmitConfig.from_env(env)
+    
+    # cookie
+    if config.session_cookie:
+        checks["cookie"] = "present"
+    else:
+        checks["cookie"] = "MISSING"
+        ok = False
+    
+    # whoami
+    if config.session_cookie:
+        try:
+            _, client = _client(args)
+            me = client.check_login()
+            checks["whoami"] = {
+                "http": 200,
+                "username": me.get("username") or me.get("account"),
+                "logged_in": me.get("logged_in"),
+            }
+            if not me.get("logged_in"):
+                ok = False
+        except Exception as e:
+            ok = False
+            checks["whoami"] = {"error": str(e)}
+    else:
+        checks["whoami"] = "skipped (no cookie)"
+    
+    # dist zip
+    zip_path = Path.cwd() / "dist" / "agent.zip"
+    if zip_path.exists():
+        sha = hashlib.sha256(zip_path.read_bytes()).hexdigest()[:8]
+        checks["dist_zip"] = {"bytes": zip_path.stat().st_size, "sha256_8": sha}
+    else:
+        checks["dist_zip"] = "MISSING"
+    
+    # gateway key
+    if config.api_key:
+        checks["gateway_key"] = "present"
+        try:
+            _, meter_client = _meter_client(args)
+            bal = meter_client.balance()
+            checks["balance"] = {
+                "account": bal.get("account"),
+                "available": bal.get("available_balance"),
+                "currency": bal.get("currency"),
+            }
+        except Exception as e:
+            checks["balance"] = f"unavailable: {e}"
+    else:
+        checks["gateway_key"] = "MISSING"
+    
+    record = {"ok": ok, "checks": checks}
+    lines = [f"doctor: ok={ok}"]
+    for key, value in checks.items():
+        if isinstance(value, dict):
+            lines.append(f"  {key}: {json.dumps(value, ensure_ascii=False)}")
+        else:
+            lines.append(f"  {key}: {value}")
+    emit(args, record, lines)
+    return 0 if ok else 2
+
+
 def cmd_models(args: argparse.Namespace) -> int:
     """Print the gateway's price table, as the metering site publishes it."""
     _, client = _meter_client(args)
@@ -931,6 +1008,8 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--meter", action="store_true", help="check the metering session instead")
 
     add("balance", "read the metering balance and billing freshness", cmd_balance)
+
+    add("doctor", "run a quick environment self-check", cmd_doctor)
 
     add("models", "list the gateway's models and their published prices", cmd_models)
 

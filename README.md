@@ -129,6 +129,7 @@ Account:
 arcbench whoami
 arcbench whoami --meter                        # the metering service's own session
 arcbench balance                               # logs in with the gateway access key
+arcbench doctor                                # quick environment self-check
 arcbench models                                # the gateway's price table
 arcbench usage --granularity day               # metered spend per bucket and model
 arcbench usage --since 2026-09-15T00:00:00Z --model deepseek-v4-flash
