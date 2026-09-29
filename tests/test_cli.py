@@ -302,9 +302,19 @@ class DoctorCommandTests(unittest.TestCase):
             old_cwd = os.getcwd()
             try:
                 os.chdir(tmp)
-                args = build_parser().parse_args(["doctor"])
-                code = args.func(args)
-                self.assertEqual(code, 2)  # ok=False returns 2
+                # Clear all ARC_BENCH_* env vars to ensure hermetic test, but keep HOME for Path.home()
+                kept_vars = {k: v for k, v in os.environ.items()
+                             if k in ("HOME", "USERPROFILE", "HOMEPATH", "HOMEDRIVE")}
+                with patch.dict(os.environ, kept_vars, clear=True):
+                    args = build_parser().parse_args(["doctor"])
+                    # Mock _client and _meter_client to fail if called
+                    with patch("arcbench_cli.cli._client") as mock_client, \
+                         patch("arcbench_cli.cli._meter_client") as mock_meter:
+                        code = args.func(args)
+                        # Fail if any HTTP request was made
+                        mock_client.assert_not_called()
+                        mock_meter.assert_not_called()
+                    self.assertEqual(code, 2)  # ok=False returns 2
             finally:
                 os.chdir(old_cwd)
 
